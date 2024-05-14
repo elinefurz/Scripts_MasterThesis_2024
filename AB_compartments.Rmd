@@ -1,0 +1,740 @@
+---
+title: "A/B compartment analysis"
+author: "Eline Furseth"
+date: "2024-12-01"
+output: 
+  html_document: 
+    css: styles.css
+    toc: true
+    toc_float: true
+    number_sections: false
+    code_folding: hide
+editor_options: 
+  chunk_output_type: console
+---
+
+# Packages
+```{r message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+
+library(tidyverse)
+library(readr)
+library(dplyr)
+library(tidyr)
+library(GenomicRanges)
+
+# Define color palette
+colorbrewer_palette <- c("#a6cee3", "#1f78b4", "#b2df8a", "#33a02c", "#fb9a99", "#e31a1c", "#fdbf6f", "#ff7f00", "#cab2d6", "#6a3d9a", "#ffff99", "#b15928")
+custom_palette_AB <- c("#b2df8a", "#6a3d9a")
+custom_palette_CT <- c("#fdbf6f", "#a6cee3")
+custom_palette_TADs <- c("#fb9a99", "#ffff99")
+```
+
+# Loading eigenvector track 
+Made for fish ID TT20, resolution 150 kb. 
+
+```{r}
+file <- "/mnt/users/efurseth/R/analysis_tads_loops/eigs-cis_TT150k.cis.vecs.tsv"
+data <- read.table(file, header = TRUE, sep = "\t")
+selected_columns <- c("chrom", "start", "end", "weight", "E1")
+filtered_data <- data[, selected_columns]
+# Convert 'chrom' to numeric
+filtered_data$chrom <- as.numeric(filtered_data$chrom)
+# Sort the data by 'chrom'
+filtered_data <- filtered_data[order(filtered_data$chrom), ]
+# Keep only rows where 'chrom' values are between 1 and 29
+filtered_data <- subset(filtered_data, chrom >= 1 & chrom <= 29)
+# Remove rows with NA values
+filtered_data <- filtered_data[complete.cases(filtered_data), ]
+# Add the 'Compartment' column based on the condition
+filtered_data <- mutate(filtered_data, Compartment = ifelse(E1 > 0, "A", "B"))
+
+# Save the dataset to a .Rdata file
+save(filtered_data, file = "filtered_data_E1_TT150kb.Rdata")
+```
+
+# Inspecting dataset
+
+## Compartment counts in chromosomes
+```{r}
+# Group by 'chrom' and 'Compartment', then count the occurrences
+compartment_counts <- filtered_data %>%
+  group_by(chrom, Compartment) %>%
+  summarize(Count = n())
+
+
+# Create a bar plot 
+ggplot(compartment_counts, aes(x = as.factor(chrom), y = Count, fill = Compartment)) +
+  geom_bar(stat = "identity", position = "dodge", color = "black") +
+  labs(x = "Chromosome",
+       y = "Count") +
+  scale_fill_manual(values = custom_palette_AB) +  # Use custom colors
+  scale_x_discrete(breaks = unique(as.factor(compartment_counts$chrom))) +  # Show all numbers on the x-axis
+  theme_minimal()
+```
+
+# Making datasets for each chromosome
+```{r}
+# Get unique chromosome names
+chromosomes <- unique(filtered_data$chrom)
+
+# Iterate over chromosomes
+for (chromosome in chromosomes) {
+  
+  # Filter data for the current chromosome and keep selected columns
+  subset_data <- filtered_data[filtered_data$chrom == chromosome, c("chrom", "start", "end", "weight", "E1"), drop = FALSE]
+  
+  # Save the subset data as a TSV file
+  write.table(subset_data, file = paste0(chromosome, "_subset_data.tsv"), sep = "\t", quote = FALSE, row.names = FALSE)
+}
+```
+
+# Distribution of A and B in the whole genome
+```{r}
+# Summarize the counts for each compartment (A and B) across the genome
+genome_distribution <- compartment_counts %>%
+  group_by(Compartment) %>%
+  summarise(Total_Count = sum(Count))
+
+# Print the result to see number of bp in each compartment
+print(genome_distribution)
+7214*150000 # A compartment
+7346*150000 # B compartment
+```
+
+
+# Summary
+
+```{r}
+summary(filtered_data)
+```
+
+
+# Difference in gene expression between compartments?
+
+## Gene datasets
+```{r}
+genes <- read_tsv("https://salmobase.org/datafiles/TSV/genes/AtlanticSalmon/Ssal_v3.1/Ensembl_genes.tsv")
+
+OGtbl <- read_tsv("https://salmobase.org/datafiles/TSV/og/2021-11.tsv")
+
+
+dupsWithNeighborCount <-
+
+  OGtbl %>%
+  filter(spc == "Ssal") %>%
+  dplyr::select(gene_id, teleost) %>%
+  group_by(teleost) %>%
+  filter(n() == 2) %>% # genes with two copies in teleost ortholog group
+  ungroup() %>%
+  left_join(dplyr::select(genes, gene_id, position, seqname), by = "gene_id") %>%
+  group_by(teleost) %>%
+  filter(all(grepl("^[0-9]+", seqname))) %>% # no unplaced scaffolds
+  filter(seqname[1] != seqname[2]) %>% # only duplicates on different chromosomes
+  ungroup() %>%
+  rowwise() %>%
+  mutate(neighborPos = list(c((position + 1):(position + 10), (position - 1):(position - 10)))) %>%
+  unnest(neighborPos) %>%
+  ungroup() %>%
+  left_join(dplyr::select(genes, og, position, seqname), by = c("neighborPos" = "position", "seqname" = "seqname")) %>%
+  na.omit() %>%
+  group_by(teleost, gene_id) %>%
+  summarise(neighborOGs = list(og)) %>%
+  group_by(teleost) %>%
+  filter(n() == 2) %>%
+  summarise(sharedNeighbors = length(intersect(neighborOGs[[1]], neighborOGs[[2]]))) %>%
+  filter(sharedNeighbors > 0) %>%
+  left_join(dplyr::select(filter(OGtbl, spc == "Ssal"), teleost, gene_id), by = "teleost") %>%
+  left_join(dplyr::select(genes, gene_id, seqname, start, end, strand), by = "gene_id") %>%
+  arrange(start) %>%
+  group_by(teleost) %>%
+  arrange(as.integer(seqname)) %>%
+  mutate(ab = c("dupA", "dupB")) %>%
+  ungroup() %>%
+  pivot_wider(names_from = ab, names_glue = "{.value}_{ab}", values_from = gene_id:strand)
+```
+
+```{r}
+# Define the directory names
+CC_dir <- c("CC02_liv", "CC03_liv", "CC05_liv", "CC10_liv", "CC15_liv")
+TT_dir <- c("TT07_liv", "TT08_liv", "TT12_liv", "TT18_liv", "TT20_liv")
+
+# Specify the base directory path 
+base_path <- "/net/fs-2/scale/OrionStore/Scratch/jukw/Eline/star_salmon"
+
+# Function to read and process files in the directory
+read_and_process_directory <- function(directory) {
+  cat("Processing directory:", directory, "\n")
+  
+  # Specify the file you want to read
+  file_to_read <- file.path(directory, "quant.genes.sf")
+  
+  cat("Reading file:", file_to_read, "\n")
+  
+  # Attempt to read the file
+  tryCatch(
+    {
+      # Skip the first row 
+      tab <- read_table(file_to_read, col_names = FALSE, skip = 1)
+      tab <- tab %>% mutate(sample = basename(directory))
+      return(tab)
+    },
+    error = function(e) {
+      warning(paste("Error reading file:", file_to_read, "\n", "Error message:", e$message))
+      return(NULL)
+    }
+  )
+}
+
+# Process CC directories
+CC_data <- lapply(file.path(base_path, CC_dir, fsep = "/"), read_and_process_directory)
+CC_result <- do.call(rbind, CC_data)
+
+# Process TT directories
+TT_data <- lapply(file.path(base_path, TT_dir, fsep = "/"), read_and_process_directory)
+TT_result <- do.call(rbind, TT_data)
+
+colnames <- c("Gene_id", "Length", "Effective_length", "TPM", "NumReads", "Sample")
+colnames(CC_result) <- colnames
+colnames(TT_result) <- colnames
+
+# Combining CC- and TT-samples in one big dataset
+merged_gene_data <- rbind(TT_result, CC_result)
+
+# TT gene data for fish TT20
+TT_gene_data <- merged_gene_data %>%
+  filter(str_starts(Sample, "TT20"))
+
+# Add a new column log2TPM with log2(TPM+1) values
+TT_gene_data$log2TPM <- log2(TT_gene_data$TPM + 1)
+```
+
+## Assigning compartment to gene-ID's in TT
+
+```{r}
+# Convert the 'chrom' column in filtered_data to a character 
+filtered_data$chrom <- as.character(filtered_data$chrom)
+
+# Merge TT_gene_data, genes, and filtered_data
+merged_data <- TT_gene_data %>%
+  left_join(genes, by = c("Gene_id" = "gene_id")) %>%
+  left_join(filtered_data, by = c("seqname" = "chrom", "start" = "start", "end" = "end"))
+
+# Filter rows where seqname is between 1 and 29
+merged_data <- filter(merged_data, between(as.numeric(seqname), 1, 29))
+
+# Select and rename columns
+TT_gene_data <- merged_data %>%
+  dplyr::select(Gene_id, Length, Effective_length, TPM, NumReads, seqname, start, end, Sample, log2TPM) %>%
+  dplyr::rename("chrom" = seqname)
+```
+
+```{r}
+# Convert TT_gene_data to GRanges object
+gr_gene_data <- GRanges(seqnames = TT_gene_data$chrom,
+                        ranges = IRanges(start = TT_gene_data$start, end = TT_gene_data$end),
+                        strand = "*")
+
+# Convert filtered_data to GRanges object
+gr_filtered_data <- GRanges(seqnames = filtered_data$chrom,
+                            ranges = IRanges(start = filtered_data$start, end = filtered_data$end),
+                            strand = "*")
+
+# Check for overlaps
+overlaps <- overlapsAny(gr_gene_data, gr_filtered_data)
+
+# Assign Compartment values based on overlaps
+TT_gene_data$Compartment <- ifelse(overlaps, "A", "B")
+
+# Save the dataset to a .Rdata file
+save(TT_gene_data, file = "TT_gene_data.Rdata")
+```
+
+
+```{r}
+# Calculate average gene expression (TPM) 
+mean_expression <- TT_gene_data %>%
+  group_by(Gene_id, Compartment) %>%
+  summarise(Mean_TPM = mean(log2TPM, na.rm = TRUE))
+
+# Print the mean expression data
+print(mean_expression)
+
+# Perform a statistical test to compare gene expression between compartments
+# Wilcoxon rank-sum test
+wilcox.p.all <- wilcox.test(TT_gene_data$log2TPM[TT_gene_data$Compartment=="A"],                             TT_gene_data$log2TPM[TT_gene_data$Compartment=="B"],                             
+                            alternative = "greater") 
+
+# Extract p-value
+p_value <- wilcox.p.all$p.value
+
+# Print the result
+cat("Wilcoxon Rank-Sum Test p-value:", p_value, "\n")
+
+# Convert p-value to character string with scientific notation format
+p_value_text <- format(p_value, scientific = TRUE, digits = 2)
+
+# Create boxplot
+ggplot(mean_expression, aes(x = Compartment, y = Mean_TPM, fill = Compartment)) +
+  geom_boxplot() +
+  scale_fill_manual(values = custom_palette_AB) +  
+  labs(x = "Compartment", y = "Mean Gene Expression (Mean log2(TPM + 1))") + 
+  theme_light() +
+  theme(axis.text = element_text(size = 12),  
+        axis.title = element_text(size = 14),  
+        legend.title = element_blank(),
+        legend.text = element_text(size = 12),  # Increase size of legend text
+        legend.key.size = unit(1.2, "cm")) +  # Increase size of legend key
+  annotate(geom = "text", x = 1.5, y = max(mean_expression$Mean_TPM),
+           label = paste("p-value =", p_value_text), size = 4, hjust = 0.5)  # Add p-value text
+```
+
+
+```{r}
+# Number of genes in each compartment
+genes_count <- table(mean_expression$Compartment)
+
+# Print the counts
+print(genes_count)
+(53806/59086)*100
+
+```
+
+# Between genotypes
+```{r}
+fileCC <- "/mnt/users/efurseth/R/analysis_tads_loops/eigs-cis_CC150k.cis.vecs.tsv"
+dataCC <- read.table(fileCC, header = TRUE, sep = "\t")
+selected_columns <- c("chrom", "start", "end", "weight", "E1")
+filtered_data_CC <- dataCC[, selected_columns]
+# Convert 'chrom' to numeric
+filtered_data_CC$chrom <- as.numeric(filtered_data_CC$chrom)
+# Sort the data by 'chrom'
+filtered_data_CC <- filtered_data_CC[order(filtered_data_CC$chrom), ]
+# Keep only rows where 'chrom' values are between 1 and 29
+filtered_data_CC <- subset(filtered_data_CC, chrom >= 1 & chrom <= 29)
+# Remove rows with NA values
+filtered_data_CC <- filtered_data_CC[complete.cases(filtered_data_CC), ]
+# Add the 'Compartment' column based on the condition
+filtered_data_CC <- mutate(filtered_data_CC, Compartment = ifelse(E1 > 0, "A", "B"))
+```
+
+```{r}
+summary_stats_filtered_data_TT <- summary(filtered_data)
+summary_stats_filtered_data_CC <- summary(filtered_data_CC)
+
+# Compare summary statistics
+print(summary_stats_filtered_data_TT)
+print(summary_stats_filtered_data_CC)
+```
+
+
+## Frequency comparison
+```{r}
+table_filtered_data_TT <- table(filtered_data$Compartment)
+table_filtered_data_CC <- table(filtered_data_CC$Compartment)
+
+# Compare frequency tables
+print("Filtered Data_TT:")
+print(table_filtered_data_TT)
+
+print("Filtered Data_CC:")
+print(table_filtered_data_CC)
+```
+
+
+## Distribution along chromosomes
+```{r}
+library(ggplot2)
+
+# Create a combined dataset
+combined_data <- rbind(
+  mutate(filtered_data, Dataset = "Genotype TT"),
+  mutate(filtered_data_CC, Dataset = "Genotype CC")
+)
+
+# Set custom chromosome order (assuming they are numeric)
+chromosome_order <- as.character(1:29)
+
+# Plot the distribution of A and B compartments
+ggplot(combined_data, aes(x = factor(chrom, levels = chromosome_order), fill = Compartment)) +
+  geom_bar(position = "stack", color = "black", stat = "count") +
+  facet_wrap(~Dataset, scales = "free", ncol = 1) +
+  labs(title = "Distribution of A and B Compartments along Chromosomes",
+       x = "Chromosome",
+       y = "Number of bins") +
+  theme_minimal() +
+  scale_fill_manual(values = custom_palette_AB) +  # Use custom colors
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))  # Rotate x-axis labels for better readability
+
+```
+
+
+# Between duplicates
+
+```{r}
+# DupA
+dupsA <- dupsWithNeighborCount %>%
+  select(gene_id_dupA, seqname_dupA, start_dupA, end_dupA, strand_dupA) %>%
+  mutate(compartment_dupA = NA)
+
+# Convert dupsA to GRanges
+dupsA_ranges <- GRanges(
+  seqnames = dupsA$seqname_dupA,
+  ranges = IRanges(start = dupsA$start_dupA, end = dupsA$end_dupA),
+  strand = dupsA$strand_dupA
+)
+
+# Convert filtered_data to GRanges
+filtered_ranges <- GRanges(
+  seqnames = filtered_data$chrom,
+  ranges = IRanges(start = filtered_data$start, end = filtered_data$end),
+  strand = "*"
+)
+
+# Find overlaps for dupsA
+overlap_indices_A <- findOverlaps(dupsA_ranges, filtered_ranges)
+
+# Add compartment information to dupsA
+dupsA$compartment_dupA <- NA
+dupsA$compartment_dupA[queryHits(overlap_indices_A)] <- filtered_data$Compartment[subjectHits(overlap_indices_A)]
+```
+
+```{r}
+# DupB
+dupsB <- dupsWithNeighborCount %>%
+  select(gene_id_dupB, seqname_dupB, start_dupB, end_dupB, strand_dupB) %>%
+  mutate(compartment_dupB = NA)
+
+# Convert dupsB to GRanges
+dupsB_ranges <- GRanges(
+  seqnames = dupsB$seqname_dupB,
+  ranges = IRanges(start = dupsB$start_dupB, end = dupsB$end_dupB),
+  strand = dupsB$strand_dupB
+)
+
+# Convert filtered_data to GRanges
+filtered_ranges <- GRanges(
+  seqnames = filtered_data$chrom,
+  ranges = IRanges(start = filtered_data$start, end = filtered_data$end),
+  strand = "*"
+)
+
+# Find overlaps for dupsB
+overlap_indices_B <- findOverlaps(dupsB_ranges, filtered_ranges)
+
+# Add compartment information to dupsB
+dupsB$compartment_dupB <- NA
+dupsB$compartment_dupB[queryHits(overlap_indices_B)] <- filtered_data$Compartment[subjectHits(overlap_indices_B)]
+```
+
+```{r}
+# Adding compartment_dupA
+dupsWithNeighborCount <- left_join(dupsWithNeighborCount, dupsA %>% select(gene_id_dupA, compartment_dupA), by = "gene_id_dupA")
+
+# Adding compartment_dupB
+dupsWithNeighborCount <- left_join(dupsWithNeighborCount, dupsB %>% select(gene_id_dupB, compartment_dupB), by = "gene_id_dupB")
+```
+
+```{r}
+dups_in_diff_compartments <- dupsWithNeighborCount %>%
+  filter(compartment_dupA != compartment_dupB)
+```
+
+
+## Adding gene expression values to the duplicates that lies in different compartments
+
+```{r}
+# Add an empty column TPM_dupA
+dups_in_diff_compartments$log2TPM_dupA <- NA
+
+# Match gene_id_dupA with Gene_id and assign TPM values
+match_indices <- match(dups_in_diff_compartments$gene_id_dupA, TT_gene_data$Gene_id)
+valid_matches <- !is.na(match_indices)
+
+dups_in_diff_compartments$log2TPM_dupA[valid_matches] <- TT_gene_data$log2TPM[match_indices[valid_matches]]
+
+# Add an empty column TPM_dupB
+dups_in_diff_compartments$log2TPM_dupB <- NA
+
+# Match gene_id_dupB with Gene_id and assign TPM values
+match_indices <- match(dups_in_diff_compartments$gene_id_dupB, TT_gene_data$Gene_id)
+valid_matches <- !is.na(match_indices)
+
+dups_in_diff_compartments$log2TPM_dupB[valid_matches] <- TT_gene_data$log2TPM[match_indices[valid_matches]]
+
+save(dups_in_diff_compartments, file ="dups_in_diff_compartments.Rdata")
+```
+
+## Does duplicates in compartment A have a stronger gene expression than duplicates in compartment B?
+```{r}
+# Perform paired t-test
+t_test_result <- t.test(dups_in_diff_compartments$log2TPM_dupA, dups_in_diff_compartments$log2TPM_dupB, paired = TRUE, alternative = "two.sided")
+
+# Print the result
+print(t_test_result)
+
+#Perform a statistical test to compare gene expression between compartments
+# Filter data for compartment A and compartment B
+data_compA <- dups_in_diff_compartments[dups_in_diff_compartments$compartment_dupA == "A", ]
+data_compB <- dups_in_diff_compartments[dups_in_diff_compartments$compartment_dupB == "B", ]
+
+# Perform Welch's t-test
+welch_test_result <- t.test(data_compA$log2TPM_dupA, data_compB$log2TPM_dupB, var.equal = FALSE)
+
+# Print the test result
+print(welch_test_result)
+```
+
+
+## Adding gene expression levels to duplicate dataset
+
+```{r}
+# Add an empty column TPM_dupA
+dupsWithNeighborCount$TPM_dupA <- NA
+
+# Using gene expression data from the same fish that has been used for Hi-C, TT20
+TT20_gene_data <- TT_gene_data[TT_gene_data$Sample == "TT20_liv", ]
+
+# Match gene_id_dupA with Gene_id and assign TPM values
+match_indices <- match(dupsWithNeighborCount$gene_id_dupA, TT20_gene_data$Gene_id)
+valid_matches <- !is.na(match_indices)
+
+dupsWithNeighborCount$TPM_dupA[valid_matches] <- TT20_gene_data$TPM[match_indices[valid_matches]]
+
+# Add an empty column TPM_dupB
+dupsWithNeighborCount$TPM_dupB <- NA
+
+# Match gene_id_dupB with Gene_id and assign TPM values
+match_indices <- match(dupsWithNeighborCount$gene_id_dupB, TT20_gene_data$Gene_id)
+valid_matches <- !is.na(match_indices)
+
+dupsWithNeighborCount$TPM_dupB[valid_matches] <- TT20_gene_data$TPM[match_indices[valid_matches]]
+```
+
+
+## Calculate expression level difference
+```{r}
+dupsWithNeighborCount$expression_difference <- abs(dupsWithNeighborCount$TPM_dupA - dupsWithNeighborCount$TPM_dupB)
+```
+
+## Compute the mean expression level for the entire genome
+```{r}
+genome_mean_expression <- mean(c(dupsWithNeighborCount$TPM_dupA, dupsWithNeighborCount$TPM_dupB), na.rm = TRUE)
+
+print(genome_mean_expression)
+```
+
+# Difference in gene expression between compartments
+```{r}
+# Prepare duplicates tables
+dup1 <- dupsWithNeighborCount %>%           
+  mutate(dupmatch = paste(gene_id_dupA, gene_id_dupB, sep="_")) %>%           
+  select(seqname_dupA, start_dupA, end_dupA, gene_id_dupA, dupmatch) 
+
+dup2 <- dupsWithNeighborCount %>%         
+  mutate(dupmatch = paste(gene_id_dupA, gene_id_dupB, sep="_")) %>%         
+  select(seqname_dupB, start_dupB, end_dupB, gene_id_dupB, dupmatch) 
+
+library(fuzzyjoin) 
+
+# Add gene expression data to duplicates data
+duptable1 = filtered_data %>%               
+  mutate(bin_id = paste(chrom, start, end, sep="_")) %>%               
+  genome_inner_join(dup1, c('chrom' = 'seqname_dupA', 'start'='start_dupA','end'='end_dupA'))            
+
+duptable2 = filtered_data %>%   
+  mutate(bin_id = paste(chrom, start, end, sep="_")) %>%   
+  genome_inner_join(dup2, c('chrom' = 'seqname_dupB', 'start'='start_dupB','end'='end_dupB')) 
+
+# Select relevant columns
+duptable1 <- duptable1 %>% 
+  select(bin_id, Compartment, gene_id = gene_id_dupA, dupmatch) 
+
+duptable2 <- duptable2 %>% 
+  select(bin_id, Compartment, gene_id = gene_id_dupB, dupmatch) 
+
+# Combine selected columns 
+duptable <- rbind(duptable1, duptable2) 
+duptable <- duptable %>% group_by(dupmatch) %>%               
+  add_count() 
+
+duptable %>% filter(n==3) %>% arrange(dupmatch) 
+
+# Count compartments types for all genes
+compartment.type.count <- duptable %>% 
+  group_by(gene_id) %>%             
+  summarize(compartment.type = length(unique(Compartment))) 
+
+# Table of compartment counts 
+table(compartment.type.count$compartment.type) # 22000 genes overlap one distinct compartment, A or B
+
+# Filter genes with compartment type 1, i.e. A
+keep.genes <- compartment.type.count %>%     
+  filter(compartment.type == "1") 
+
+# Only keep genes with one compartment type
+duptable <- duptable %>%             
+  filter(gene_id %in% keep.genes$gene_id) # only keep genes that are in one type of compartment 
+
+# Keep genes with only two occurences 
+duptable <- duptable %>%               
+  distinct(gene_id, .keep_all = T) %>%              
+  select(1:4) %>%               
+  group_by(dupmatch) %>%               
+  add_count() %>%               
+  filter(n==2)               
+# 10457 gene duplicate pairs table(table(duptable$dupmatch))
+
+# Join gene expression data 
+duptable <- duptable %>%                 
+  left_join(TT_gene_data %>%  
+              select(Gene_id, TPM), by=c('gene_id'='Gene_id')) 
+
+# Plot gene expression by compartments 
+duptable %>%   
+  ggplot(aes(y=log2(TPM+1), x=Compartment)) +   
+  geom_boxplot() 
+
+# Calculate number of duplicate pairs 
+nrow(duptable)/2 
+
+# Identify indices of duplicate genes 
+idx.dup2 = unique(gsub(".*_", "", duptable$dupmatch)) 
+
+idx.dup1 = unique(gsub("_.*", "", duptable$dupmatch)) 
+
+table(table(idx.dup2)) 
+
+table(table(match(idx.dup2, duptable$gene_id))) 
+
+table(table(match(idx.dup1, duptable$gene_id))) 
+
+subtab1 = duptable[match(idx.dup1, duptable$gene_id),] 
+subtab2 = duptable[match(idx.dup2, duptable$gene_id),] 
+colnames(subtab1) <- paste0(colnames(subtab1), "_dup1") 
+colnames(subtab2) <- paste0(colnames(subtab2), "_dup2") 
+
+# Combine duplicate gene datatables 
+duptable_wide <- cbind(subtab1, subtab2) 
+
+table(duptable_wide$Compartment_dup1 != duptable_wide$Compartment_dup2) 
+
+# reorganize by A and B compartments 
+duptable.list.reordered = lapply(1:nrow(duptable_wide), function(i){ 
+  if(duptable_wide$Compartment_dup1[i]==duptable_wide$Compartment_dup2[i]) 
+    return(duptable_wide[i,])   
+  if(duptable_wide[i,"Compartment_dup1"]=="A") 
+    return(duptable_wide[i,])   
+  if(duptable_wide[i,"Compartment_dup1"]=="B") {     
+    dat <- duptable_wide[i,c(grep("dup2", colnames(duptable_wide)), grep("dup1", colnames(duptable_wide)))]     
+    idx.dup1 <- grep("dup1", colnames(dat))     
+    idx.dup2 <- grep("dup2", colnames(dat))     
+    colnames(dat)[idx.dup1] <- gsub("_dup1", "_dup2", colnames(dat)[idx.dup1])     
+    colnames(dat)[idx.dup2] <- gsub("_dup2", "_dup1", colnames(dat)[idx.dup2])     
+    return(dat)   } } ) 
+
+duptable.reordered <- do.call(rbind, duptable.list.reordered) 
+
+# Filter duplicate pairs with different compartment types and expression in TPM > 1
+duptable_wide_diffcomp <- duptable.reordered %>%   
+  filter(Compartment_dup1 != Compartment_dup2) %>%   
+  filter(TPM_dup1>1 | TPM_dup2>1) # after TPM filter, 2557 dup pairs left... 
+
+#Statistical tests (t-test and wilcoxon)
+t.test(log2(duptable_wide_diffcomp$TPM_dup1+1), log2(duptable_wide_diffcomp$TPM_dup2+1), paired = T)
+
+wilcox.test(log2(duptable_wide_diffcomp$TPM_dup1+1), log2(duptable_wide_diffcomp$TPM_dup2+1), paired = T) 
+
+t.test(log2(duptable_wide_diffcomp$TPM_dup1+1), log2(duptable_wide_diffcomp$TPM_dup2+1), paired = T, alternative = "greater") 
+
+wilcox.test(log2(duptable_wide_diffcomp$TPM_dup1+1), log2(duptable_wide_diffcomp$TPM_dup2+1), paired = T, alternative = "greater")
+
+# Visualize distribution of expression differences
+hist(log2(duptable_wide_diffcomp$TPM_dup1+1)-log2(duptable_wide_diffcomp$TPM_dup2+1), 100) 
+
+library(ggpubr) # table for plotting
+dup1 <- duptable_wide[,1:6] 
+
+dup2 <- duptable_wide[,7:ncol(duptable_wide)] 
+colnames(dup1) <- gsub("_dup*.", "", colnames(dup1)) 
+colnames(dup2) <- gsub("_dup*.", "", colnames(dup2)) 
+duplicate_long <- rbind(dup1, dup2) 
+
+wilcox.p <- wilcox.test(log2(duptable_wide_diffcomp$TPM_dup1+1), log2(duptable_wide_diffcomp$TPM_dup2+1), paired = T, alternative = "greater") 
+
+p1 <- duplicate_long %>% 
+  ggplot(aes(y = log2(TPM + 1), x = Compartment, fill = Compartment)) +   
+  geom_boxplot() +   
+  annotate(geom = "text", y = 15, x = 1.5, label = paste0('p-value=', round(wilcox.p$p.value, 7))) + 
+  theme_light() +
+  scale_fill_manual(values = custom_palette_AB) +
+  ylab("Gene expression values (log2(TPM+1))") +  # Set y-axis label
+  theme(axis.title.x = element_text(size = 14),  # Adjust x-axis label size
+        axis.title.y = element_text(size = 14))  # Adjust y-axis label size
+
+
+wilcox.p.all <- wilcox.test(TT_gene_data$log2TPM[TT_gene_data$Compartment=="A"],                             TT_gene_data$log2TPM[TT_gene_data$Compartment=="B"],                             
+                            alternative = "greater") 
+
+p2 <- TT_gene_data %>%
+  ggplot(aes(y = log2(TPM + 1), x = Compartment, fill = Compartment)) +   
+  geom_boxplot() +   
+  annotate(geom = "text", y = 15, x = 1.5, label = paste0('p-value=', round(wilcox.p.all$p.value, 7))) + 
+  theme_light() +
+  scale_fill_manual(values = custom_palette_AB) +
+  ggtitle("A) All genes") + 
+  ylab("Gene expression values (log2(TPM+1))")  # Set y-axis label
+
+library(patchwork) 
+
+# Create a plot with an empty legend for p2
+empty_legend_plot <- p2 + theme(legend.position = "none")
+
+# Combine p1 and the plot with the empty legend
+combined_plot <- empty_legend_plot + p1 +
+  guides(fill = guide_legend(title = "Compartment"))
+
+combined_plot
+```
+
+
+# Resampling test - Is the distribution of duplicates in compartment types random?
+
+```{r}
+# Initialize an empty vector to store shares
+all_shares <- numeric(1000)
+
+# Run all iterations and gather the results
+for (i in 1:1000) {
+  # Randomly shuffle compartments for one duplicate gene
+  shuffled_comp1 <- sample(duptable.reordered$Compartment_dup1, size = nrow(duptable.reordered), replace = FALSE)
+  
+  # Calculate the share of duplicate pairs in the same compartment
+  all_shares[i] <- sum(shuffled_comp1 == duptable.reordered$Compartment_dup2) / length(shuffled_comp1)
+}
+
+# Calculate the observed share of duplicates in the same compartment
+observed_share <- sum(duptable.reordered$Compartment_dup1 == duptable.reordered$Compartment_dup2) / nrow(duptable.reordered)
+
+# Calculate the resampling p-value
+p_value <- sum(all_shares >= observed_share) / 1000
+print(p_value)
+
+# Create a kernel density plot of the distribution of all iterations
+density_plot <- ggplot(data.frame(share = all_shares), aes(x = share)) +
+  geom_density(fill = "skyblue", color = "black") +
+  geom_vline(xintercept = observed_share, linetype = "dashed", color = "red") +
+  labs(title = "Density Plot of Share of Duplicate Pairs in Same Compartments",
+       x = "Share of Duplicate Pairs in Same Compartments",
+       y = "Density") +
+  theme_minimal()
+
+# Display the density plot
+print(density_plot)
+
+```
+
+```{r}
+save(duptable.reordered, file = "duptable.reordered.Rdata")
+```
+
