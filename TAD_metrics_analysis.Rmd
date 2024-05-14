@@ -1,0 +1,362 @@
+---
+title: "TAD metrics and gene expression differences"
+output: html_document
+date: "2024-02-06"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+library(dplyr)
+library(tidyverse)
+library(fuzzyjoin)
+library(readr)
+library(tidyverse)
+library(tidyr)
+```
+
+
+```{r}
+genes <- read_tsv("https://salmobase.org/datafiles/TSV/genes/AtlanticSalmon/Ssal_v3.1/Ensembl_genes.tsv")
+
+OGtbl <- read_tsv("https://salmobase.org/datafiles/TSV/og/2021-11.tsv")
+
+
+dupsWithNeighborCount <-
+
+  OGtbl %>%
+
+  filter(spc=="Ssal") %>%
+
+  select(gene_id, teleost) %>%
+
+  group_by(teleost) %>%
+
+  filter(n()==2) %>% # genes with two copies in teleost ortholog group
+
+  ungroup() %>%
+
+  left_join(select(genes,gene_id,position,seqname),by="gene_id") %>%
+
+  group_by(teleost) %>%
+
+  filter(all(grepl("^[0-9]+",seqname))) %>% # no unplaced scaffolds
+
+  filter(seqname[1]!=seqname[2]) %>% # only duplicates on different chromosomes
+
+  ungroup() %>%
+
+  rowwise() %>%
+
+  mutate(neighborPos = list(c((position+1):(position+10),(position-1):(position-10)))) %>%
+
+  unnest(neighborPos) %>%
+
+  ungroup() %>%
+
+  left_join(select(genes,og,position,seqname),by=c("neighborPos"="position","seqname"="seqname")) %>%
+
+  na.omit() %>%
+
+  group_by(teleost,gene_id) %>%
+
+  summarise(neighborOGs=list(og)) %>%
+
+  group_by(teleost) %>%
+
+  filter(n()==2) %>%
+
+  summarise(sharedNeighbors=length(intersect(neighborOGs[[1]],neighborOGs[[2]]))) %>%
+
+  filter(sharedNeighbors>0) %>%
+
+  left_join(select(filter(OGtbl,spc=="Ssal"), teleost,gene_id),by="teleost") %>%
+
+  left_join(select(genes, gene_id, seqname,start,end,strand), by="gene_id") %>%
+
+  arrange(start) %>%
+
+  group_by(teleost) %>%
+
+  arrange(as.integer(seqname)) %>%
+
+  mutate(ab=c("dupA","dupB")) %>%
+
+  ungroup() %>%  
+
+  pivot_wider(names_from=ab, names_glue = "{.value}_{ab}", values_from = gene_id:strand)
+```
+
+
+```{r}
+duptable <- dupsWithNeighborCount %>% 
+  mutate(dupmatch = paste(gene_id_dupA, gene_id_dupB, sep="_")) %>% 
+  mutate(seqname_dupA = as.integer(seqname_dupA))
+```
+
+```{r}
+TADs <- read_tsv("./TT20.40000_balanced_hicfindtads_domains.bed", col_names = F) 
+TADs <- TADs %>% 
+  mutate(tadID = X4)
+
+TADs <- TADs %>% 
+  mutate(insul.score = X5)
+
+TADgenes <- genes %>% 
+  filter(seqname %in% 1:29) %>% 
+  mutate(seqname = as.integer(seqname)) %>% 
+  genome_inner_join(TADs, by=c('seqname' = 'X1', 'start'='X2', 'end'='X3'))
+
+load("filtered_data_TT150kb.Rdata")
+filtered_data <- filtered_data %>%
+  mutate(chrom = as.integer(chrom))
+
+TADgenes <- TADgenes %>%
+  genome_inner_join(filtered_data, by = c('seqname' = 'chrom', 'start' = 'start', 'end' = 'end'))
+
+dupa = select(duptable, c(3,5,7, 9, dupmatch))
+dupb = select(duptable, c(4,6,8, 10, dupmatch))
+
+dupa <- dupa %>%  
+  dplyr::rename(gene_id = gene_id_dupA, seqname=seqname_dupA , start=start_dupA, end=end_dupA)
+
+dupb <- dupb %>%  
+  dplyr::rename(gene_id = gene_id_dupB, seqname=seqname_dupB , start=start_dupB, end=end_dupB)
+
+duplong = rbind(dupa, dupb)
+```
+
+
+```{r}
+jaccard.list = lapply(1:nrow(duptable), function(i) {
+  
+  dat <- duptable[i,]
+  tada = TADgenes$tadID[match(dat$gene_id_dupA, TADgenes$gene_id)]
+  tadb = TADgenes$tadID[match(dat$gene_id_dupB, TADgenes$gene_id)]
+  
+  compartment_1 <- TADgenes$Compartment[TADgenes$tadID %in% tada]
+  compartment_2 <- TADgenes$Compartment[TADgenes$tadID %in% tadb]
+  
+  if(sum(is.na(c(tada, tadb)))==1) {
+    
+    data.frame(TAD_pair = paste(tada, tadb, sep="|"), dupA = dat$gene_id_dupA, dupB = dat$gene_id_dupB, jaccard_index = 0)
+  } 
+  
+  if(sum(is.na(c(tada, tadb)))==2) {
+    
+    data.frame(TAD_pair = paste(tada, tadb, sep="|"), dupA = dat$gene_id_dupA, dupB = dat$gene_id_dupB, jaccard_index = NA)
+  } 
+  
+  genes.tada <- TADgenes$gene_id[TADgenes$tadID %in% tada]
+  genes.tadb <- TADgenes$gene_id[TADgenes$tadID %in% tadb]
+  
+  match.index.a <- match(genes.tada, duplong$gene_id)
+  match.index.b <- match(genes.tadb, duplong$gene_id)
+  
+  match.index.a <- ifelse(!is.na(match.index.a <- match(genes.tada, duplong$gene_id)), duplong$dupmatch[match.index.a], genes.tada)
+  match.index.b <- ifelse(!is.na(match.index.b <- match(genes.tadb, duplong$gene_id)), duplong$dupmatch[match.index.b], genes.tadb)
+  
+ # jaccard_result <- data.frame(TAD_pair = character(0), jaccard_index = numeric(0))
+  jaccard_index <- function(a,b) {
+  intersection = length(intersect(a, b))  # unique shared elements
+  union_set = length(unique(c(a, b)))
+  
+  if(union_set == 0) {
+    return(0)
+  }
+  return(intersection / union_set)
+}
+
+  jaccard.values = jaccard_index(match.index.a, match.index.b)
+ return(data.frame(TAD_pair = paste(tada, tadb, sep="|"), dupA = dat$gene_id_dupA, dupB = dat$gene_id_dupB, jaccard_index = jaccard.values))
+  
+  # Get compartment for TADs
+  
+ #return(data.frame(TAD_pair = paste(tada, tadb, sep="|"), 
+                    #dupA = dat$gene_id_dupA, 
+                    #dupB = dat$gene_id_dupB, 
+                   # jaccard_index = jaccard.values,
+                   # Compartment_1 = compartment_1,
+                   # Compartment_2 = compartment_2))
+  
+    }
+)
+
+jaccard.table = do.call(rbind, jaccard.list)
+```
+
+```{r}
+load("./TT_gene_data.Rdata")
+
+jaccard.table = jaccard.table %>% 
+  left_join(TT_gene_data %>% select(Gene_id, log2TPM), by=c('dupA'='Gene_id')) %>% 
+  left_join(TT_gene_data %>% select(Gene_id, log2TPM), by=c('dupB'='Gene_id'))
+  
+
+jaccard.table %>% 
+  group_by(TAD_pair) %>%
+  filter(log2TPM.x<1 | log2TPM.y<1) %>% 
+  summarize(jac = mean(jaccard_index), 
+            mean.tpm.diff = mean(abs(log2TPM.x-log2TPM.y))) %>% 
+  filter(jac != 0) %>% 
+  ggplot(aes(x = mean.tpm.diff, y = jac)) + 
+  geom_point() +
+  labs(x = "Mean Gene expression Difference", y = "Jaccard Index") +  # Specify axis names
+  ggtitle("Jaccard index vs. Mean gene expression difference for all TAD-pairs") + 
+  theme_light()
+
+
+# Summarize mean TPM difference per TAD_pair
+jaccard_summary <- jaccard.table %>%
+  group_by(TAD_pair) %>%
+  summarize(mean.tpm.diff = mean(abs(log2TPM.x - log2TPM.y)),
+            jaccard_index = mean(jaccard_index))
+
+```
+
+
+```{r}
+insul.score.list <- lapply(1:nrow(duptable), function(i) {
+  
+  dat <- duptable[i,]
+  tada <- TADgenes$tadID[match(dat$gene_id_dupA, TADgenes$gene_id)]
+  tadb <- TADgenes$tadID[match(dat$gene_id_dupB, TADgenes$gene_id)]
+  
+  if (sum(is.na(c(tada, tadb))) == 1) {
+    return(data.frame(TAD_pair = paste(tada, tadb, sep = "|"), dupA = dat$gene_id_dupA, dupB = dat$gene_id_dupB, insul_score.diff = 0))
+  } else if (sum(is.na(c(tada, tadb))) == 2) {
+    return(data.frame(TAD_pair = paste(tada, tadb, sep = "|"), dupA = dat$gene_id_dupA, dupB = dat$gene_id_dupB, insul_score.diff = NA))
+  }
+  
+  genes.tada <- TADgenes$gene_id[TADgenes$tadID %in% tada]
+  genes.tadb <- TADgenes$gene_id[TADgenes$tadID %in% tadb]
+  
+  match.index.a <- match(genes.tada, duplong$gene_id)
+  match.index.b <- match(genes.tadb, duplong$gene_id)
+  
+  match.index.a <- ifelse(!is.na(match.index.a <- match(genes.tada, duplong$gene_id)), duplong$dupmatch[match.index.a], genes.tada)
+  match.index.b <- ifelse(!is.na(match.index.b <- match(genes.tadb, duplong$gene_id)), duplong$dupmatch[match.index.b], genes.tadb)
+  
+  insul.score.tada <- mean(TADgenes$insul.score[TADgenes$tadID == tada])
+  insul.score.tadb <- mean(TADgenes$insul.score[TADgenes$tadID == tadb])
+  
+  insul.score.diff <- abs(insul.score.tada - insul.score.tadb)
+  
+  return(data.frame(TAD_pair = paste(tada, tadb, sep = "|"), dupA = dat$gene_id_dupA, dupB = dat$gene_id_dupB, insul_score.diff = insul.score.diff))
+    
+})
+
+insul.score.table = do.call(rbind, insul.score.list)
+```
+
+```{r}
+insul.score.table = insul.score.table %>% 
+  left_join(TT_gene_data %>% select(Gene_id, log2TPM), by=c('dupA'='Gene_id')) %>% 
+  left_join(TT_gene_data %>% select(Gene_id, log2TPM), by=c('dupB'='Gene_id'))
+  
+
+insul.score.table %>% 
+  group_by(TAD_pair) %>%
+  filter(log2TPM.x<1 | log2TPM.y<1) %>% 
+  summarize(insul.score.diff = insul_score.diff, mean.tpm.diff = mean(abs(log2TPM.x-log2TPM.y))) %>% 
+ # filter(insul.score.diff != 0) %>% 
+  ggplot(aes(x=mean.tpm.diff, y= insul.score.diff)) + 
+  geom_point() +
+  labs(x = "Mean Gene expression Difference", y = "Insulation score difference") +
+  ggtitle("Insulation score difference vs. Mean gene expression difference for all TAD-pairs") +
+  theme_light()
+
+```
+
+
+```{r}
+summary(TADs$insul.score)
+```
+
+
+# Statistics
+
+```{r}
+corr.test.jaccard <- cor.test(jaccard.table$jaccard_index, abs(jaccard.table$log2TPM.x - jaccard.table$log2TPM.y))
+print(corr.test.jaccard)
+
+# Calculate means
+mean_jac <- mean(jaccard.table$jaccard_index)
+mean_tpm_diff <- mean(abs(jaccard.table$log2TPM.x - jaccard.table$log2TPM.y))
+
+# Define y-coordinate for text annotation
+y_annotation <- max(mean_jac) * 4 
+
+# Create scatterplot with linear regression line and annotations
+jaccard.table %>% 
+  group_by(TAD_pair) %>%
+  filter(log2TPM.x < 1 | log2TPM.y < 1) %>% 
+  summarize(mean_jac = mean(jaccard_index), mean_tpm_diff = mean(abs(log2TPM.x - log2TPM.y))) %>% 
+  filter(mean_jac != 0) %>%
+  ggplot(aes(x = mean_tpm_diff, y = mean_jac)) + 
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE, color = "red") +
+  #ggtitle("Mean Jaccard index vs. mean TPM difference for all TAD-pairs") +
+  labs(x = "Mean Gene Expression Difference", y = "Jaccard Index") +
+  theme_minimal() +
+  theme(
+    axis.title.x = element_text(size = 14),  # Adjust size of x-axis label
+    axis.title.y = element_text(size = 14)  # Adjust size of y-axis label
+  ) +
+  theme(plot.title = element_text(hjust = 0.5)) +
+  annotate("text", x = max(mean_tpm_diff) * 9, y = y_annotation, 
+           label = paste("Correlation coefficient:", round(corr.test.jaccard$estimate, 2), 
+                         "\n", "p-value:", format.pval(corr.test.jaccard$p.value)), 
+           color = "black", size = 4)
+```
+
+Significant. The more similar TADs, the bigger difference in TPM. Goes against the hypothesis of equal TADs having equal gene regulation. 
+
+```{r}
+# Calculate TPM difference
+jaccard.table <- jaccard.table %>%
+  mutate(tpm_diff = abs(log2TPM.x - log2TPM.y))
+
+# Create bins for TPM difference
+jaccard.table <- jaccard.table %>%
+  mutate(tpm_bin = cut(tpm_diff, breaks = seq(0, max(jaccard.table$tpm_diff), by = 0.2), include.lowest = TRUE))
+
+# Create boxplot
+ggplot(jaccard.table, aes(x = tpm_bin, y = jaccard_index)) +
+  geom_boxplot() +
+  ggtitle("TPM Difference Binned by 0.2") +
+  xlab("TPM Difference Bins") +
+  ylab("Jaccard index") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+```
+
+
+```{r}
+corr.test.insul <- cor.test(insul.score.table$insul_score.diff, abs(insul.score.table$log2TPM.x - insul.score.table$log2TPM.y))
+print(corr.test.insul)
+
+insul.score.table %>% 
+  group_by(TAD_pair) %>%
+  filter(log2TPM.x < 1 | log2TPM.y < 1) %>% 
+  summarize(insul_score.diff = insul_score.diff, mean_tpm_diff = mean(abs(log2TPM.x - log2TPM.y))) %>% 
+  ggplot(aes(x = mean_tpm_diff, y = insul_score.diff)) + 
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE, color = "red") +
+  labs(x = "Mean Gene Expression Difference", y = "Insulation score difference") +
+  theme_minimal() +
+  theme(
+    axis.title.x = element_text(size = 14),  # Adjust size of x-axis label
+    axis.title.y = element_text(size = 14)  # Adjust size of y-axis label
+  ) +
+  annotate("text", x = max(mean_tpm_diff) * 9, y = y_annotation, 
+           label = paste("Correlation coefficient:", round(corr.test.insul$estimate, 2), 
+                         "\n", "p-value:", format.pval(corr.test.insul$p.value)), 
+           color = "black", size = 4)
+
+```
+
+Not Significant. 
+
+
