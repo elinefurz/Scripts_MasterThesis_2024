@@ -1,0 +1,350 @@
+---
+title: "CTCF_motifs"
+output: html_document
+date: "2024-03-14"
+editor_options: 
+  chunk_output_type: console
+---
+
+# Packages
+```{r message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+
+library(tidyverse)
+library(readr)
+library(dplyr)
+library(data.table)
+library(GenomicRanges)
+library(viridis)  
+
+# Define Pastel2 color palette
+colorbrewer_palette <- c("#a6cee3", "#1f78b4", "#b2df8a", "#33a02c", "#fb9a99", "#e31a1c", "#fdbf6f", "#ff7f00", "#cab2d6", "#6a3d9a", "#ffff99", "#b15928")
+custom_palette_AB <- c("#b2df8a", "#cab2d6")
+custom_palette_CT <- c("#fdbf6f", "#a6cee3")
+custom_palette_TADs <- c("#fb9a99", "grey")
+```
+
+# Datasets
+
+## Retrieve CTCF datasets
+
+### CTCF nr. 1: CTCF_MA0139.2
+According to Jun, this one is most abundently found. 
+```{r}
+file_1 <- "/net/fs-2/scale/OrionStore/Scratch/jukw/Eline/tobias/BINDdetect/CTCF_MA0139.2/beds/CTCF_MA0139.2_ATAC_footprints_bound.bed"
+CTCF_1 <- read.table(file_1, header = TRUE, sep = "\t")
+colnames(CTCF_1) <- c("chrom", "start", "end", "motif", "score", "strand", "chrom.refseq",
+                         "start.refseq", "end.refseq", "peak_name", "length")
+```
+
+
+### CTCF nr. 2: CTCFL_MA1102.3
+```{r}
+file_2 <- "/net/fs-2/scale/OrionStore/Scratch/jukw/Eline/tobias/BINDdetect/CTCFL_MA1102.3/beds/CTCFL_MA1102.3_ATAC_footprints_bound.bed"
+CTCF_2 <- read.table(file_2, header = TRUE, sep = "\t")
+colnames(CTCF_2) <- c("chrom", "start", "end", "motif", "score", "strand", "chrom.refseq",
+                         "start.refseq", "end.refseq", "peak_name", "length")
+```
+
+
+### CTCF nr. 3: CTCF_MA1929.2
+```{r}
+file_3 <- "/net/fs-2/scale/OrionStore/Scratch/jukw/Eline/tobias/BINDdetect/CTCF_MA1929.2/beds/CTCF_MA1929.2_ATAC_footprints_bound.bed"
+CTCF_3 <- read.table(file_3, header = TRUE, sep = "\t")
+colnames(CTCF_3) <- c("chrom", "start", "end", "motif", "score", "strand", "chrom.refseq",
+                         "start.refseq", "end.refseq", "peak_name", "length")
+```
+
+
+### CTCF nr. 4: CTCF_MA1930.2
+```{r}
+file_4 <- "/net/fs-2/scale/OrionStore/Scratch/jukw/Eline/tobias/BINDdetect/CTCF_MA1930.2/beds/CTCF_MA1930.2_ATAC_footprints_bound.bed"
+CTCF_4 <- read.table(file_4, header = TRUE, sep = "\t")
+colnames(CTCF_4) <- c("chrom", "start", "end", "motif", "score", "strand", "chrom.refseq",
+                         "start.refseq", "end.refseq", "peak_name", "length")
+```
+
+
+## Retrieve TAD border data
+Using TT20, 40 kb. 
+```{r}
+TAD.border <- read_tsv("./TT20.40000_balanced_hicfindtads_boundaries.bed")
+colnames(TAD.border) <- c("chrom", "start", "end", "ID", "score")
+average_diff <- mean(TAD.border$end - TAD.border$start)
+```
+
+# Finding overlaps between bound CTCF motif 1 and TAD borders
+```{r}
+# Create GRanges objects for TAD.border and CTCF_1
+gr_tad <- with(TAD.border, GRanges(chrom, IRanges(start, end)))
+gr_ctcf <- with(CTCF_1, GRanges(chrom, IRanges(start, end), motif = motif))
+
+# Find overlaps
+overlaps <- findOverlaps(gr_tad, gr_ctcf)
+
+# Make new columns
+TAD.border$CTCF <- FALSE
+TAD.border$motif <- NA
+TAD.border$count <- 0
+
+# Identify TADs with overlaps
+overlapping_tads <- unique(queryHits(overlaps))
+
+# Update the 'CTCF' and 'count' columns based on overlaps
+TAD.border$CTCF[overlapping_tads] <- TRUE
+TAD.border$count[overlapping_tads] <- countOverlaps(gr_tad[overlapping_tads], gr_ctcf)
+
+# Get the indices of overlapping TADs and CTCF motifs
+query_hits <- queryHits(overlaps)
+subject_hits <- subjectHits(overlaps)
+
+# Create a dataframe of overlaps
+overlap_df <- data.frame(tad_index = query_hits, motif = mcols(gr_ctcf)$motif[subject_hits])
+
+# Group by 'tad_index' and summarize 'motif' into a comma-separated string
+overlap_df <- overlap_df %>%
+  group_by(tad_index) %>%
+  summarise(motif = paste(motif, collapse = ","))
+
+# Update the 'motif' column for overlapping TADs
+TAD.border$motif[overlapping_tads] <- overlap_df$motif
+
+# View the modified TAD.border
+head(TAD.border)
+
+# Check rows where 'CTCF' is TRUE and 'motif' is NA
+missing_motif_rows <- TAD.border$CTCF == TRUE & is.na(TAD.border$motif)
+
+# Print these rows
+print(TAD.border[missing_motif_rows, ]) 
+```
+
+## How many TAD borders have one or more of this CTCF motif?
+```{r}
+# Count the number of rows where CTCF is TRUE
+num_rows_with_ctcf <- sum(TAD.border$CTCF)
+
+# Print the result
+cat("Number of rows with CTCF:", num_rows_with_ctcf, "\n")
+```
+
+
+
+# Finding overlaps between all four CTCF motifs and TAD borders
+
+
+```{r}
+# Create a function to perform the overlap analysis
+overlap_analysis <- function(tad, ctcf) {
+  # Create GRanges objects
+  gr_tad <- with(tad, GRanges(chrom, IRanges(start, end)))
+  gr_ctcf <- with(ctcf, GRanges(chrom, IRanges(start, end), motif = motif))
+  
+  # Find overlaps
+  overlaps <- findOverlaps(gr_tad, gr_ctcf)
+  
+  # Identify TADs with overlaps
+  overlapping_tads <- unique(queryHits(overlaps))
+  
+  # Update the 'CTCF' and 'count' columns based on overlaps
+  tad$CTCF[overlapping_tads] <- TRUE
+  tad$count[overlapping_tads] <- countOverlaps(gr_tad[overlapping_tads], gr_ctcf)
+  
+  # Get the indices of overlapping TADs and CTCF motifs
+  query_hits <- queryHits(overlaps)
+  subject_hits <- subjectHits(overlaps)
+  
+  # Create a dataframe of overlaps
+  overlap_df <- data.frame(tad_index = query_hits, motif = mcols(gr_ctcf)$motif[subject_hits])
+  
+  # Group by 'tad_index' and summarize 'motif' into a comma-separated string
+  overlap_df <- overlap_df %>%
+    group_by(tad_index) %>%
+    summarise(motif = paste(motif, collapse = ","))
+  
+  # Update the 'motif' column for overlapping TADs
+  tad$motif[overlapping_tads] <- overlap_df$motif
+  
+  return(tad)
+}
+
+# Initialize new columns in TAD.border
+TAD.border$CTCF <- FALSE
+TAD.border$motif <- NA
+TAD.border$count <- 0
+
+# List of CTCF dataframes
+ctcf_list <- list(CTCF_1, CTCF_2, CTCF_3, CTCF_4)
+
+# Loop over the CTCF datasets
+for (ctcf in ctcf_list) {
+  TAD.border <- overlap_analysis(TAD.border, ctcf)
+}
+
+# View the modified TAD.border
+head(TAD.border)
+
+# Check rows where 'CTCF' is TRUE and 'motif' is NA
+missing_motif_rows <- TAD.border$CTCF == TRUE & is.na(TAD.border$motif)
+
+# Print these rows
+print(TAD.border[missing_motif_rows, ])
+```
+
+```{r}
+# How many borders have at least one CTCF motif?
+num_borders_with_motif <- sum(TAD.border$CTCF == TRUE)
+print(num_borders_with_motif)
+```
+
+
+```{r}
+# Convert chrom to factor with levels in increasing order
+TAD.border$chrom <- factor(TAD.border$chrom, levels = 1:29)
+
+# Plot 1: Bound motifs
+plot_bound <- ggplot(TAD.border, aes(x = chrom, fill = factor(CTCF))) +
+  geom_bar(color = "black", size = 0.5) +
+  labs(
+    x = "Chromosome",
+    y = "Number of TAD Borders",
+    title = "A) Bound motifs"
+  ) +
+  scale_fill_manual(
+    name = "CTCF bound",
+    values = c("TRUE" = "#e31a1c", "FALSE" = "#fb9a99"),
+    labels = c("TRUE" = "Yes", "FALSE" = "No")
+  ) +
+  theme_minimal() +
+  theme(
+    axis.title.y = element_text(size = 14),  # Adjust size of y-axis title
+    axis.ticks.x = element_blank(),  # Remove x-axis ticks
+    axis.text.x = element_text(size = 12),  # Adjust size of x-axis labels
+    axis.title.x = element_text(size = 14)  # Adjust size of x-axis title
+  ) +
+  scale_x_discrete(breaks = seq(1, 29, by = 5))
+```
+
+# Repeating the steps, using both bound and unbound motifs for CTCF
+```{r}
+file_1u <- "/net/fs-2/scale/OrionStore/Scratch/jukw/Eline/tobias/BINDdetect/CTCF_MA0139.2/beds/CTCF_MA0139.2_ATAC_footprints_unbound.bed"
+CTCF_1_unb <- read.table(file_1u, header = TRUE, sep = "\t")
+colnames(CTCF_1_unb) <- c("chrom", "start", "end", "motif", "score", "strand", "chrom.refseq",
+                         "start.refseq", "end.refseq", "peak_name", "length")
+
+file_2u <- "/net/fs-2/scale/OrionStore/Scratch/jukw/Eline/tobias/BINDdetect/CTCFL_MA1102.3/beds/CTCFL_MA1102.3_ATAC_footprints_unbound.bed"
+CTCF_2_unb <- read.table(file_2u, header = TRUE, sep = "\t")
+colnames(CTCF_2_unb) <- c("chrom", "start", "end", "motif", "score", "strand", "chrom.refseq",
+                         "start.refseq", "end.refseq", "peak_name", "length")
+
+file_3u <- "/net/fs-2/scale/OrionStore/Scratch/jukw/Eline/tobias/BINDdetect/CTCF_MA1929.2/beds/CTCF_MA1929.2_ATAC_footprints_unbound.bed"
+CTCF_3_unb <- read.table(file_3u, header = TRUE, sep = "\t")
+colnames(CTCF_3_unb) <- c("chrom", "start", "end", "motif", "score", "strand", "chrom.refseq",
+                         "start.refseq", "end.refseq", "peak_name", "length")
+
+file_4u <- "/net/fs-2/scale/OrionStore/Scratch/jukw/Eline/tobias/BINDdetect/CTCF_MA1930.2/beds/CTCF_MA1930.2_ATAC_footprints_unbound.bed"
+CTCF_4_unb <- read.table(file_4u, header = TRUE, sep = "\t")
+colnames(CTCF_4_unb) <- c("chrom", "start", "end", "motif", "score", "strand", "chrom.refseq",
+                         "start.refseq", "end.refseq", "peak_name", "length")
+```
+
+```{r}
+# List of CTCF dataframes
+ctcf_list_all <- list(CTCF_1, CTCF_2, CTCF_3, CTCF_4, CTCF_1_unb, CTCF_2_unb, CTCF_3_unb, CTCF_4_unb)
+
+# Loop over the CTCF datasets
+for (ctcf in ctcf_list_all) {
+  TAD.border <- overlap_analysis(TAD.border, ctcf)
+}
+
+# View the modified TAD.border
+head(TAD.border)
+
+# Check rows where 'CTCF' is TRUE and 'motif' is NA
+missing_motif_rows <- TAD.border$CTCF == TRUE & is.na(TAD.border$motif)
+
+# Print these rows
+print(TAD.border[missing_motif_rows, ])
+
+# How many borders have at least one CTCF motif?
+num_borders_with_motif_all <- sum(TAD.border$CTCF == TRUE)
+print(num_borders_with_motif_all)
+```
+
+
+```{r}
+# Convert chrom to factor with levels in increasing order
+TAD.border$chrom <- factor(TAD.border$chrom, levels = 1:29)
+
+# Plot 2: Bound and Unbound motifs
+plot_both <- ggplot(TAD.border, aes(x = chrom, fill = factor(CTCF))) +
+  geom_bar(color = "black", size = 0.5) +
+  labs(
+    x = "Chromosome",
+    title = "B) Bound and Unbound motifs"
+  ) +
+  scale_fill_manual(
+    name = "CTCF",
+    values = c("TRUE" = "#e31a1c", "FALSE" = "#fb9a99"),
+    labels = c("TRUE" = "Yes", "FALSE" = "No")
+  ) +
+  theme_minimal() +
+  theme(
+    axis.title.y = element_blank(),  
+    axis.ticks.x = element_blank(),  
+    axis.text.x = element_text(size = 12),  
+    axis.title.x = element_text(size = 14)  
+  ) +
+  scale_x_discrete(breaks = seq(1, 29, by = 5))
+
+# Mean sequence length of CTCF motifs
+differences <- TAD.border$end - TAD.border$start
+
+# Calculate the mean difference
+mean_difference <- mean(differences)
+
+# Print the result
+print(mean_difference)
+
+
+# Convert 'chrom' variable to numeric
+TAD.border$chrom <- as.numeric(as.character(TAD.border$chrom))
+
+```
+
+
+# Save the dataset
+```{r}
+save(TAD.border, file = "TAD.border.CTCF.Rdata")
+```
+
+```{r}
+library(patchwork) 
+
+# Create a plot with an empty legend for p2
+empty_legend_plot <- plot_bound + theme(legend.position = "none")
+
+# Combine p1 and the plot with the empty legend
+combined_plot <- empty_legend_plot + plot_both +
+  guides(fill = guide_legend(title = "CTCF"))
+
+combined_plot
+```
+
+
+# How many TADs have CTCF in both borders?
+```{r}
+# Create a new logical vector where each element is TRUE if the corresponding border 
+# and the previous border both have CTCF, and FALSE otherwise
+has_ctcf_both_borders <- TAD.border$CTCF & c(FALSE, TAD.border$CTCF[-length(TAD.border$CTCF)])
+
+# Add this as a new column to TAD.border
+TAD.border$has_ctcf_both_borders <- has_ctcf_both_borders
+
+# Count the number of borders that have CTCF in both themselves and the previous border
+num_borders_with_ctcf_both_borders <- sum(has_ctcf_both_borders)
+
+# Print the result
+print(num_borders_with_ctcf_both_borders)
+```
+
