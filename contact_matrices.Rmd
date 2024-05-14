@@ -1,0 +1,139 @@
+---
+title: "Inspection of contact matrices for TT vs CC"
+author: "Eline Furseth"
+output: html_document
+date: "2024-01-19"
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+
+library(tidyverse)
+library(dplyr)
+library(ggplot2)
+library(rhdf5)
+```
+
+# Extracting contact count data from .cool-files for both genotypes
+```{r}
+h5f_CC = H5Fopen("CC03.40000_balanced.cool") 
+h5f_TT = H5Fopen("TT20.40000_balanced.cool")       
+
+# Investigate pixels and bins data 
+binsCC = as_tibble(h5f_CC$bins) 
+pixelsCC = as_tibble(h5f_CC$pixels) %>% mutate(bin1_id = bin1_id+1, bin2_id = bin2_id+1) 
+binsCC <- binsCC %>% mutate(bin_id = 1:nrow(binsCC)) 
+pixelsCC <- pixelsCC %>%     
+  left_join(binsCC, by=c('bin1_id'='bin_id')) %>%   
+  left_join(binsCC, by=c('bin2_id'='bin_id')) 
+
+rm(binsCC) 
+sum(pixelsCC$count) 
+
+binsTT = as_tibble(h5f_TT$bins) 
+pixelsTT = as_tibble(h5f_TT$pixels) %>% 
+  mutate(bin1_id = bin1_id+1, bin2_id = bin2_id+1) 
+
+binsTT <- binsTT %>% 
+  mutate(bin_id = 1:nrow(binsTT)) 
+
+pixelsTT <- pixelsTT %>%     
+  left_join(binsTT, by=c('bin1_id'='bin_id')) %>%   
+  left_join(binsTT, by=c('bin2_id'='bin_id')) 
+
+rm(binsTT) 
+sum(pixelsTT$count) 
+
+chr1TT = pixelsTT %>% 
+  mutate(samebin = (start.x == start.y)) %>%           
+  filter(chrom.x == 0,  chrom.y == 0, samebin) %>%           
+  mutate(bincombine = paste(start.x, start.y)) 
+
+chr1CC = pixelsCC %>% 
+  mutate(samebin = (start.x == start.y)) %>%   
+  filter(chrom.x == 0,  chrom.y == 0, samebin) %>%   
+  mutate(bincombine = paste(start.x, start.y)) 
+
+# comparing 'counts' for same bins in two genotypes 
+chr1TT %>%
+  left_join(chr1CC, by = 'bincombine') %>%
+  ggplot(aes(x = count.x, y = count.y)) +
+  geom_point() +
+  labs(
+    x = "Contacts per bin TT",
+    y = "Contacts per bin CC",
+    title = "Comparison of identical bin-contacts between CC and TT",
+    subtitle = "Chromosome 1"
+  ) + theme_light()
+
+chr1TT %>%   
+  left_join(chr1CC, by='bincombine') %>%   
+  select(count.x, count.y) %>%   colSums(., na.rm = T)
+```
+
+
+# Repeating for all chromosomes
+
+Making a loop that iterates across all 29 chromosomes. 
+```{r}
+# Create a vector of chromosome numbers
+chromosomes <- 0:28 # Chromosome 1 = chrom 0 in the data. 
+
+# Make an empty list to store plots
+list_of_plots <- list()
+
+# Loop over all chromosomes
+for (i in chromosomes) {
+  # Filter data for the current chromosome
+  chrTT = pixelsTT %>% 
+    mutate(samebin = (start.x == start.y)) %>%           
+    filter(chrom.x == i,  chrom.y == i, samebin) %>%           
+    mutate(bincombine = paste(start.x, start.y)) 
+
+  chrCC = pixelsCC %>% 
+    mutate(samebin = (start.x == start.y)) %>%   
+    filter(chrom.x == i,  chrom.y == i, samebin) %>%   
+    mutate(bincombine = paste(start.x, start.y)) 
+
+  # Create data frame for plot
+  df <- chrTT %>%   
+    left_join(chrCC, by='bincombine') 
+
+  # Fit linear model
+  fit <- lm(count.y ~ count.x, data = df)
+
+  # Get R-squared value
+  r2 <- summary(fit)$r.squared
+
+  # Calculate correlation and p-value
+  cor.test.result <- cor.test(df$count.x, df$count.y)
+
+  # Extract p-value and adjust it
+  p.val <- cor.test.result$p.value
+  p.adj <- p.adjust(p.val, method = "bonferroni") 
+
+  # Create plot
+plot <- df %>%
+  ggplot(aes(x = count.x, y = count.y)) +
+  geom_point() +
+  labs(
+    x = "Contacts per bin-pair TT",
+    y = "Contacts per bin-pair CC",
+    title = paste("Chromosome", i + 1)
+  ) + 
+  annotate("text", x = Inf, y = Inf, label = paste("R^2 = ", round(r2, 2),", Adj p-value = ", format(p.adj, digits=2, scientific=TRUE)), vjust = 1.5, hjust = 1.5, size = 5) +
+  theme_light() +
+  theme(plot.margin = margin(1, 1, 1, 1, "cm")) 
+
+  # Store plot in list
+  list_of_plots[[i + 1]] <- plot
+
+  # Save plot as image
+  ggsave(paste("plot_chr", i, ".png", sep = ""), plot = plot, width = 7, height = 5, dpi = 300)
+}
+
+list_of_plots[[29]]
+```
+
