@@ -1,0 +1,150 @@
+---
+title: "Transposable elements (TEs) in duplicated regions"
+date: "2024-03-14"
+output: 
+  html_document: 
+    css: styles.css
+    toc: true
+    toc_float: true
+    number_sections: false
+    code_folding: hide
+editor_options: 
+  chunk_output_type: console
+---
+
+# Packages
+```{r message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+
+library(tidyverse)
+library(readr)
+library(dplyr)
+library(tidyr)
+library(GenomicRanges)
+library(viridis)  
+
+# Define Pastel2 color palette
+colorbrewer_palette <- c("#a6cee3", "#1f78b4", "#b2df8a", "#33a02c", "#fb9a99", "#e31a1c", "#fdbf6f", "#ff7f00", "#cab2d6", "#6a3d9a", "#ffff99", "#b15928")
+custom_palette_AB <- c("#b2df8a", "#cab2d6")
+custom_palette_CT <- c("#fdbf6f", "#a6cee3")
+custom_palette_TADs <- c("#fb9a99", "grey")
+```
+
+# Datasets
+## Retrieve TE annotation dataset
+```{r}
+TE_file <- "/mnt/users/efurseth/R/analysis_tads_loops/Salmo_salar.Ssal_v3.1.RepeatMasker.ssal_repeats_5.2.bed"
+TE_data <- read.table(TE_file, header = TRUE, sep = "\t")
+colnames(TE_data) <- c("chrom", "start", "end", "TE")
+
+TE_data$length <- TE_data$end - TE_data$start
+summary(TE_data)
+
+# Create a vector of the desired chromosome values
+chromosomes <- as.character(1:29)
+
+# Filter the data frame
+TE_data <- TE_data[TE_data$chrom %in% chromosomes, ]
+```
+
+# Do duplicates have more TEs in B compartments vs. A compartments?
+```{r}
+load("./TT_gene_data.Rdata")
+load("./dups_in_diff_compartments.Rdata")
+```
+
+## Detect overlaps between TEs and duplicate regions
+```{r}
+# Convert data.frames to GRanges objects
+duplicationRangesA <- with(dups_in_diff_compartments, GRanges(seqname_dupA, IRanges(start_dupA, end_dupA)))
+
+duplicationRangesB <- with(dups_in_diff_compartments, GRanges(seqname_dupB, IRanges(start_dupB, end_dupB)))
+
+TERanges <- with(TE_data, GRanges(chrom, IRanges(start, end)))
+
+# Find overlaps
+overlapCountsA <- countOverlaps(duplicationRangesA, TERanges)
+overlapCountsB <- countOverlaps(duplicationRangesB, TERanges)
+
+# Add overlap counts to duplicationData
+dups_in_diff_compartments$TE_dupA <- overlapCountsA
+dups_in_diff_compartments$TE_dupB <- overlapCountsB
+```
+
+## Pairwise test
+
+```{r}
+# Find length of duplicates in bp
+dups_in_diff_compartments$bp_dupA <- dups_in_diff_compartments$end_dupA - dups_in_diff_compartments$start_dupA + 1
+dups_in_diff_compartments$bp_dupB <- dups_in_diff_compartments$end_dupB - dups_in_diff_compartments$start_dupB + 1
+
+# Find overlaps
+overlaps_dupA <- findOverlaps(duplicationRangesA, TERanges)
+overlaps_dupB <- findOverlaps(duplicationRangesB, TERanges)
+
+# Get the actual overlapping regions (if a TE is 40,000 bp long but only 1,000 bp overlap, 40,000 should not be noted as length)
+real_overlaps_dupA <- pintersect(duplicationRangesA[queryHits(overlaps_dupA)],
+                                 TERanges[subjectHits(overlaps_dupA)])
+real_overlaps_dupB <- pintersect(duplicationRangesB[queryHits(overlaps_dupB)],
+                                 TERanges[subjectHits(overlaps_dupB)])
+
+# Calculate total overlap length for each duplication
+TE_length_dupA <- tapply(width(real_overlaps_dupA), 
+                         queryHits(overlaps_dupA), 
+                         FUN=sum)
+TE_length_dupB <- tapply(width(real_overlaps_dupB), 
+                         queryHits(overlaps_dupB), 
+                         FUN=sum)
+
+# Initialize new columns with zeros
+dups_in_diff_compartments$TE_length_dupA <- 0
+dups_in_diff_compartments$TE_length_dupB <- 0
+
+# Fill in the calculated TE lengths
+dups_in_diff_compartments$TE_length_dupA[as.integer(names(TE_length_dupA))] <- TE_length_dupA
+dups_in_diff_compartments$TE_length_dupB[as.integer(names(TE_length_dupB))] <- TE_length_dupB
+
+# Calculate the TE percentages for dupA and dupB
+dups_in_diff_compartments$TE_pct_dupA <- dups_in_diff_compartments$TE_length_dupA / dups_in_diff_compartments$bp_dupA * 100
+dups_in_diff_compartments$TE_pct_dupB <- dups_in_diff_compartments$TE_length_dupB / dups_in_diff_compartments$bp_dupB * 100
+
+# Keeping rows where %TE is 100 or less
+dups_in_diff_compartments <- subset(dups_in_diff_compartments, 
+                                    TE_pct_dupA <= 100 & TE_pct_dupB <= 100)
+
+#dups_in_diff_compartments$TE_pct_dupA[dups_in_diff_compartments$TE_pct_dupA > 100] <- 100
+#dups_in_diff_compartments$TE_pct_dupB[dups_in_diff_compartments$TE_pct_dupB > 100] <- 100
+
+# Not all dupA are in A compartments, this is random. Have to adjust for that. 
+# Separate the TE percentages according to the compartment
+TE_pct_A_compartment <- c(dups_in_diff_compartments$TE_pct_dupA[dups_in_diff_compartments$compartment_dupA == "A"],
+                          dups_in_diff_compartments$TE_pct_dupB[dups_in_diff_compartments$compartment_dupB == "A"])
+TE_pct_B_compartment <- c(dups_in_diff_compartments$TE_pct_dupA[dups_in_diff_compartments$compartment_dupA == "B"],
+                          dups_in_diff_compartments$TE_pct_dupB[dups_in_diff_compartments$compartment_dupB == "B"])
+
+# Perform the test
+wilcox_result <- wilcox.test(TE_pct_A_compartment, TE_pct_B_compartment, alternative = "less", paired = T)
+```
+
+
+## Visualization
+```{r}
+# Combine the data into a data frame suitable for ggplot2
+boxplot_data <- data.frame(
+  TE_pct = c(TE_pct_A_compartment, TE_pct_B_compartment),
+  Compartment = c(rep("A", length(TE_pct_A_compartment)), rep("B", length(TE_pct_B_compartment)))
+)
+
+p_value <- wilcox_result$p.value
+
+# Create the boxplot
+p <- ggplot(boxplot_data, aes(x = Compartment, y = TE_pct, fill = Compartment)) +
+  geom_boxplot() +
+  ylab("TE content (%)") +
+  ggtitle(paste("TE content among duplicates with one copy in each compartment, A vs. B (p =", format(p_value, digits = 2), ")")) +
+  scale_fill_manual(values = c("A" = "#b2df8a", "B" = "#cab2d6")) +
+  theme_light()
+
+print(p)
+```
+
