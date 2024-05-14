@@ -1,0 +1,373 @@
+---
+title: "Inspection of TADs and TAD borders"
+author: "Eline Furseth"
+date: "2024-25-01"
+output: 
+  html_document: 
+    css: styles.css
+    toc: true
+    toc_float: true
+    number_sections: false
+    code_folding: hide
+editor_options: 
+  chunk_output_type: console
+---
+
+# Packages
+```{r message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+
+library(tidyverse)
+library(readr)
+library(dplyr)
+library(tidyr)
+library(GenomicRanges)
+library(viridis)  
+
+# Define Pastel2 color palette
+colorbrewer_palette <- c("#a6cee3", "#1f78b4", "#b2df8a", "#33a02c", "#fb9a99", "#e31a1c", "#fdbf6f", "#ff7f00", "#cab2d6", "#6a3d9a", "#ffff99", "#b15928")
+custom_palette_AB <- c("#b2df8a", "#cab2d6")
+custom_palette_CT <- c("#fdbf6f", "#a6cee3")
+custom_palette_TADs <- c("#fb9a99", "grey")
+```
+
+
+# Datasets
+
+## Retrieve TAD border data
+Using TT20, 40 kb. 
+```{r}
+TAD.border <- read_tsv("./TT20.40000_balanced_hicfindtads_boundaries.bed")
+colnames(TAD.border) <- c("chrom", "start", "end", "ID", "score")
+average_diff <- mean(TAD.border$end - TAD.border$start)
+```
+
+# TAD domains 
+
+## TAD counts and distribution
+Using genotype TT, resolution 40kb. 
+```{r}
+TAD.domains <- read_tsv("./TT20.40000_balanced_hicfindtads_domains.bed")
+colnames(TAD.domains) <- c("chrom", "start", "end", "ID", "score")
+```
+
+```{r}
+summary(TAD.domains)
+```
+
+```{r}
+# Convert chrom to factor with levels in increasing order
+TAD.domains$chrom <- factor(TAD.domains$chrom, levels = 1:29)
+
+bar_plot <- ggplot(TAD.domains, aes(x = chrom, fill = chrom)) +
+  geom_bar(fill = "#fb9a99", color = "black") +
+  geom_text(
+    aes(label = ..count..),  # Display the count on top of each bar
+    stat = "count",
+    vjust = -0.5,  # Adjust the vertical position of the labels
+    position = position_stack(),
+    size = 3
+  ) +
+  labs(
+    x = "Chromosome",
+    y = "Number of TADs"
+  ) +
+    scale_x_discrete(breaks = seq(1, 29, by = 10)) +   # Show every 10th label on the x-axis
+  theme_minimal() +
+  theme(
+    plot.title = element_blank(),  # Remove the title
+    plot.subtitle = element_text(size = 16),  
+    axis.title.x = element_text(size = 14),   
+    axis.title.y = element_text(size = 14)    
+  )
+
+
+chrom_data <- read_tsv("Ssal_v3.1_chromosomes.tsv") %>%
+  filter(seqname %in% 1:29) %>%
+  dplyr::rename(chrom = seqname)
+
+# Create a new column called "nTADs" in chrom_data
+chrom_data$nTADs <- NA
+
+# Fill in the number of TADs manually for each chromosome
+chrom_data$nTADs[chrom_data$chrom == 1] <- 274 #  number of TADs for chromosome 1..etc. 
+chrom_data$nTADs[chrom_data$chrom == 2] <- 128
+chrom_data$nTADs[chrom_data$chrom == 3] <- 157
+chrom_data$nTADs[chrom_data$chrom == 4] <- 141
+chrom_data$nTADs[chrom_data$chrom == 5] <- 135
+chrom_data$nTADs[chrom_data$chrom == 6] <- 154
+chrom_data$nTADs[chrom_data$chrom == 7] <- 96
+chrom_data$nTADs[chrom_data$chrom == 8] <- 33
+chrom_data$nTADs[chrom_data$chrom == 9] <- 274
+chrom_data$nTADs[chrom_data$chrom == 10] <- 202
+chrom_data$nTADs[chrom_data$chrom == 11] <- 157
+chrom_data$nTADs[chrom_data$chrom == 12] <- 148
+chrom_data$nTADs[chrom_data$chrom == 13] <- 200
+chrom_data$nTADs[chrom_data$chrom == 14] <- 168
+chrom_data$nTADs[chrom_data$chrom == 15] <- 190
+chrom_data$nTADs[chrom_data$chrom == 16] <- 153
+chrom_data$nTADs[chrom_data$chrom == 17] <- 98
+chrom_data$nTADs[chrom_data$chrom == 18] <- 120
+chrom_data$nTADs[chrom_data$chrom == 19] <- 158
+chrom_data$nTADs[chrom_data$chrom == 20] <- 152
+chrom_data$nTADs[chrom_data$chrom == 21] <- 96
+chrom_data$nTADs[chrom_data$chrom == 22] <- 112
+chrom_data$nTADs[chrom_data$chrom == 23] <- 88
+chrom_data$nTADs[chrom_data$chrom == 24] <- 81
+chrom_data$nTADs[chrom_data$chrom == 25] <- 87
+chrom_data$nTADs[chrom_data$chrom == 26] <- 93
+chrom_data$nTADs[chrom_data$chrom == 27] <- 72
+chrom_data$nTADs[chrom_data$chrom == 28] <- 67
+chrom_data$nTADs[chrom_data$chrom == 29] <- 73
+
+# Perform correlation analysis
+correlation_result <- cor.test(chrom_data$length, chrom_data$nTADs)
+
+# Convert chromosome size to millions of base pairs
+chrom_data$length_millions <- chrom_data$length / 1000000
+
+# Create scatter plot with trendline and correlation information
+correlation_plot <- ggplot(chrom_data, aes(x = length_millions, y = nTADs)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = FALSE, color = "#fb9a99") +
+  labs(
+    x = "Chromosome Size (Millions of base pairs)",
+    y = NULL
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_blank(),  # Remove the title
+    plot.subtitle = element_blank(),  # Remove the subtitle
+    axis.title.x = element_text(size = 14),   
+    axis.title.y = element_text(size = 14)    
+  ) +
+  annotate(geom = "text", x = max(chrom_data$length_millions), y = max(chrom_data$nTADs),
+           label = paste("p-value =", format(correlation_result$p.value, scientific = TRUE, digits = 2)),
+           size = 4, hjust = 3) +  # Add p-value text
+  annotate(geom = "text", x = max(chrom_data$length_millions), y = max(chrom_data$nTADs) - 10,
+           label = paste("Correlation coefficient =", round(correlation_result$estimate, 2)),
+           size = 4, hjust = 2)  # Add correlation coefficient text
+
+
+
+
+# Print the plot
+print(correlation_plot)
+
+library(gridExtra)
+# Arrange plots side by side
+combined_plots <- grid.arrange(bar_plot, correlation_plot, ncol = 2)
+
+# Print the combined plots
+print(combined_plots)
+
+```
+
+## Genes in TADs
+
+```{r}
+# Define the directory names
+CC_dir <- c("CC02_liv", "CC03_liv", "CC05_liv", "CC10_liv", "CC15_liv")
+TT_dir <- c("TT07_liv", "TT08_liv", "TT12_liv", "TT18_liv", "TT20_liv")
+
+# Specify the base directory path with a trailing slash
+base_path <- "/net/fs-2/scale/OrionStore/Scratch/jukw/Eline/star_salmon"
+
+# Function to read and process files in a directory
+read_and_process_directory <- function(directory) {
+  cat("Processing directory:", directory, "\n")
+  
+  # Specify the file you want to read
+  file_to_read <- file.path(directory, "quant.genes.sf")
+  
+  cat("Reading file:", file_to_read, "\n")
+  
+  # Attempt to read the file
+  tryCatch(
+    {
+      # Skip the first row to treat it as column names
+      tab <- read_table(file_to_read, col_names = FALSE, skip = 1)
+      tab <- tab %>% mutate(sample = basename(directory))
+      return(tab)
+    },
+    error = function(e) {
+      warning(paste("Error reading file:", file_to_read, "\n", "Error message:", e$message))
+      return(NULL)
+    }
+  )
+}
+
+# Process CC directories
+CC_data <- lapply(file.path(base_path, CC_dir, fsep = "/"), read_and_process_directory)
+CC_result <- do.call(rbind, CC_data)
+
+# Process TT directories
+TT_data <- lapply(file.path(base_path, TT_dir, fsep = "/"), read_and_process_directory)
+TT_result <- do.call(rbind, TT_data)
+
+colnames <- c("Gene_id", "Length", "Effective_length", "TPM", "NumReads", "Sample")
+colnames(CC_result) <- colnames
+colnames(TT_result) <- colnames
+
+# Combining CC- and TT-samples in one big dataset
+merged_gene_data <- rbind(TT_result, CC_result)
+
+# TT gene data
+TT_gene_data <- merged_gene_data %>%
+  filter(str_starts(Sample, "TT20"))
+
+# Add a new column log2TPM with log2(TPM+1) values
+TT_gene_data$log2TPM <- log2(TT_gene_data$TPM + 1)
+```
+
+```{r}
+genes <- read_tsv("https://salmobase.org/datafiles/TSV/genes/AtlanticSalmon/Ssal_v3.1/Ensembl_genes.tsv")
+
+OGtbl <- read_tsv("https://salmobase.org/datafiles/TSV/og/2021-11.tsv")
+
+
+dupsWithNeighborCount <-
+
+  OGtbl %>%
+  filter(spc == "Ssal") %>%
+  dplyr::select(gene_id, teleost) %>%
+  group_by(teleost) %>%
+  filter(n() == 2) %>% # genes with two copies in teleost ortholog group
+  ungroup() %>%
+  left_join(dplyr::select(genes, gene_id, position, seqname), by = "gene_id") %>%
+  group_by(teleost) %>%
+  filter(all(grepl("^[0-9]+", seqname))) %>% # no unplaced scaffolds
+  filter(seqname[1] != seqname[2]) %>% # only duplicates on different chromosomes
+  ungroup() %>%
+  rowwise() %>%
+  mutate(neighborPos = list(c((position + 1):(position + 10), (position - 1):(position - 10)))) %>%
+  unnest(neighborPos) %>%
+  ungroup() %>%
+  left_join(dplyr::select(genes, og, position, seqname), by = c("neighborPos" = "position", "seqname" = "seqname")) %>%
+  na.omit() %>%
+  group_by(teleost, gene_id) %>%
+  summarise(neighborOGs = list(og)) %>%
+  group_by(teleost) %>%
+  filter(n() == 2) %>%
+  summarise(sharedNeighbors = length(intersect(neighborOGs[[1]], neighborOGs[[2]]))) %>%
+  filter(sharedNeighbors > 0) %>%
+  left_join(dplyr::select(filter(OGtbl, spc == "Ssal"), teleost, gene_id), by = "teleost") %>%
+  left_join(dplyr::select(genes, gene_id, seqname, start, end, strand), by = "gene_id") %>%
+  arrange(start) %>%
+  group_by(teleost) %>%
+  arrange(as.integer(seqname)) %>%
+  mutate(ab = c("dupA", "dupB")) %>%
+  ungroup() %>%
+  pivot_wider(names_from = ab, names_glue = "{.value}_{ab}", values_from = gene_id:strand)
+```
+
+### How many genes are in a TAD on average?
+
+```{r}
+# Adding genomic coordinates to my gene-file
+# Step 1: Add coordinates to TT_gene_data
+TT_gene_data <- TT_gene_data %>%
+  left_join(genes %>% select(gene_id, seqname, start, end), by = c("Gene_id" = "gene_id"))
+
+# Step 2: Rename seqname to chrom
+TT_gene_data <- TT_gene_data %>%
+  dplyr::rename(chrom = seqname)
+
+# Step 3: Filter rows with chrom values 1-29
+TT_gene_data <- TT_gene_data %>%
+  filter(chrom %in% 1:29)
+```
+
+```{r}
+# Convert TT_gene_data and TAD.border to GRanges objects
+gr_gene_data <- GRanges(
+  seqnames = Rle(TT_gene_data$chrom),
+  ranges = IRanges(start = TT_gene_data$start, end = TT_gene_data$end)
+)
+
+gr_tad_domain <- GRanges(
+  seqnames = Rle(TAD.domains$chrom),
+  ranges = IRanges(start = TAD.domains$start, end = TAD.domains$end),
+  id = TAD.domains$ID
+)
+
+# Find overlaps
+overlaps <- findOverlaps(gr_gene_data, gr_tad_domain)
+
+# Create TAD and TAD_ID columns in TT_gene_data
+TT_gene_data$TAD <- FALSE
+TT_gene_data$TAD_ID <- NA
+
+# Update TAD and TAD_ID based on overlaps
+if (length(overlaps) > 0) {
+  hits <- queryHits(overlaps)
+  TT_gene_data$TAD[hits] <- TRUE
+  TT_gene_data$TAD_ID[hits] <- gr_tad_domain$id[subjectHits(overlaps)]
+}
+
+# Print the first few rows of the updated TT_gene_data
+head(TT_gene_data)
+```
+
+```{r}
+# Filter genes that are in a TAD
+genes_in_tad <- TT_gene_data %>% filter(TAD == TRUE)
+
+# Count the number of unique Gene_id values for each TAD_ID
+genes_per_tad <- genes_in_tad %>%
+  group_by(TAD_ID) %>%
+  summarize(Unique_genes = n_distinct(Gene_id))
+
+# Calculate the average number of unique genes per TAD
+average_genes_per_tad <- mean(genes_per_tad$Unique_genes, na.rm = TRUE)
+```
+
+
+### Does genes in TADs have a higher TPM-value then genes outside?
+
+```{r}
+# Extract TPM values for genes inside and outside TADs
+tpm_inside_tads <- genes_in_tad$log2TPM
+tpm_outside_tads <- TT_gene_data$log2TPM[!TT_gene_data$Gene_id %in% genes_in_tad$Gene_id]
+
+# Calculate mean TPM for genes inside and outside TADs
+mean_tpm_inside_tads <- mean(tpm_inside_tads, na.rm = TRUE)
+mean_tpm_outside_tads <- mean(tpm_outside_tads, na.rm = TRUE)
+
+# Print the mean TPM values
+cat("Mean TPM for genes inside TADs:", mean_tpm_inside_tads, "\n")
+cat("Mean TPM for genes outside TADs:", mean_tpm_outside_tads, "\n")
+
+# Create a data frame for boxplot
+boxplot_data <- data.frame(
+  Location = c(rep("Inside TADs", length(tpm_inside_tads)),
+               rep("Outside TADs", length(tpm_outside_tads))),
+  log2TPM = c(tpm_inside_tads, tpm_outside_tads)
+)
+
+```
+
+```{r}
+# Perform Wilcoxon rank-sum test
+wilcox_test_result <- wilcox.test(tpm_inside_tads, tpm_outside_tads)
+
+# Extract p-value
+p_value <- wilcox_test_result$p.value
+
+# Plot boxplot
+ggplot(boxplot_data, aes(x = Location, y = log2TPM, fill = Location)) +
+  geom_boxplot() +
+  scale_fill_manual(values = custom_palette_TADs) +  # Use custom palette
+  labs(title = NULL,
+       x = "Location",
+       y = "Gene Expression (log2(TPM+1))") + 
+  annotate(geom = "text", x = 1.5, y = max(boxplot_data$log2TPM),
+           label = paste("p-value =", format(p_value, scientific = TRUE, digits = 2)),
+           size = 4, hjust = 0.5) +  # Add p-value text
+  theme_light() +
+  theme(axis.title = element_text(size = 14),  # Increase size of axis titles
+        axis.text = element_text(size = 14))  # Increase size of axis labels
+
+```
+
+
